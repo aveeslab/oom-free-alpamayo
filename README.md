@@ -8,9 +8,9 @@ Alpamayo-R1-10B requires 21.52 GB of VRAM, exceeding the 12–16 GB capacity of 
 
 ## Performance
 
-| Platform | Baseline | Ours | Speedup |
-|---|---|---|---|
-| RTX 5070 Ti (16 GB) | OOM | **4.09 s** | **3.55×** |
+| Platform | Baseline | Ours |
+|---|---|---|
+| RTX 5070 Ti (16 GB) | OOM | **4.09 s** |
 
 ### Platform comparison
 
