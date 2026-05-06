@@ -183,6 +183,8 @@ def _measure(vlm_resident, data_cache, label=""):
     vlm_layer_size_mb = _layer_size_mb(vlm_layers[0])
     vit_layer_size_mb = _layer_size_mb(vblocks[0]) if vblocks else 0.0
     expert_layer_size_mb = _layer_size_mb(expert_layers[0]) if expert_layers else 0.0
+    n_vit = len(vblocks)
+    n_expert = len(expert_layers)
 
     # Cleanup
     vlm_hook.remove(); vis_hook.remove(); exp_hook.remove()
@@ -196,8 +198,8 @@ def _measure(vlm_resident, data_cache, label=""):
         "vlm_layer_size_mb": vlm_layer_size_mb,
         "vit_layer_size_mb": vit_layer_size_mb,
         "expert_layer_size_mb": expert_layer_size_mb,
-        "n_vit": len(vblocks),
-        "n_expert": len(expert_layers),
+        "n_vit": n_vit,
+        "n_expert": n_expert,
         "vlm_layer_exe_ms": vlm_layer_exe_ms,
         "num_resident": len(vlm_resident),
         "resident_indices": list(vlm_resident),
