@@ -1,4 +1,4 @@
-# OOM - free - alpamyo
+# OOM-free-alpamyo
 
 Memory-efficient inference framework for **NVIDIA Alpamayo-R1** Vision-Language-Action (VLA) model on resource-constrained GPU platforms.
 
