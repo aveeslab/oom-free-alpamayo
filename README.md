@@ -94,9 +94,6 @@ Example output:
     Conservative (-2)    : 29
     Resident indices     : [0, 1, 3, 4, ...]
 
-    Predicted time       : 4.20 s
-    Speedup vs baseline  : 3.46× (baseline 14.52 s)
-
 [6] Saving config...
     Config saved to      : config.json
 ```
