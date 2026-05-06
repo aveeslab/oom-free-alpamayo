@@ -1,4 +1,4 @@
-# alpamayo-memory-optimizer
+# OOM - free - alpamyo
 
 Memory-efficient inference framework for **NVIDIA Alpamayo-R1** Vision-Language-Action (VLA) model on resource-constrained GPU platforms.
 
@@ -11,6 +11,16 @@ Alpamayo-R1-10B requires 21.52 GB of VRAM, exceeding the 12–16 GB capacity of 
 | Platform | Baseline | Ours | Speedup |
 |---|---|---|---|
 | RTX 5070 Ti (16 GB) | OOM | **4.09 s** | **3.55×** |
+
+### Platform comparison
+
+<!-- Fill in OOM or measured inference time for each platform. -->
+
+| Platform | VRAM | Baseline | Sequential Demand Layering | Pipelined Demand Layering | Ours | Speedup | Notes |
+|---|---:|---:|---:|---:|---:|---:|---|
+| RTX 5070 Ti | 16 GB | OOM | `-- s` | `-- s` | `-- s` | `--×` |  |
+| RTX 3080 Ti | 12 GB | OOM | `-- s` | `-- s` | `-- s` | `--×` |  |
+| RTX 3090 | 24 GB | OOM | `-- s` | `-- s` | `-- s` | `--×` |  |
 
 ## How it works
 
@@ -41,7 +51,7 @@ Follow NVIDIA's official instructions to install the Alpamayo-R1 Python package 
 ### 2. Install this framework
 
 ```bash
-git clone https://github.com/aveeslab/alpamayo-memory-optimizer.git
+git clone https://github.com/aveeslab/oom-free-alpamayo.git
 cd alpamayo-memory-optimizer
 pip install -e .
 ```
@@ -182,5 +192,5 @@ separate model license). See `NOTICE` for details.
 
 ## Acknowledgements
 
-- AVEES Lab, Kookmin University Graduate School of Automobile and Mobility
+- AVEES Lab, Graduate School of Automobile and Mobility, Kookmin University
 - NVIDIA NVlabs for the Alpamayo-R1 model
