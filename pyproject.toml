@@ -3,7 +3,7 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "alpamayo-memory-optimizer"
+name = "oom-free-alpamayo"
 version = "0.1.0"
 description = "Memory-efficient inference for NVIDIA Alpamayo-R1 Vision-Language-Action model on resource-constrained GPU platforms"
 readme = "README.md"
@@ -44,9 +44,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/aveeslab/alpamayo-memory-optimizer"
-Repository = "https://github.com/aveeslab/alpamayo-memory-optimizer"
-Issues = "https://github.com/aveeslab/alpamayo-memory-optimizer/issues"
+Homepage = "https://github.com/aveeslab/oom-free-alpamayo"
+Repository = "https://github.com/aveeslab/oom-free-alpamayo"
+Issues = "https://github.com/aveeslab/oom-free-alpamayo/issues"
 
 # Note: Alpamayo-R1 itself (the model package and weights) must be installed
 # separately from NVIDIA's official channel — see README. This project does

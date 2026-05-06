@@ -41,7 +41,8 @@ class DoubleBufHook:
                       Expert) and False for single-shot modules (ViT).
     """
 
-    def __init__(self, auto_restart: bool = True) -> None:
+    def __init__(self, auto_restart: bool = True,
+                 enable_timing: bool = False) -> None:
         # CPU-side pinned storage
         self.cpu_params: dict = {}     # idx -> {name: pinned_tensor}
         self.cpu_buffers: dict = {}    # idx -> {name: pinned_tensor}
@@ -68,6 +69,12 @@ class DoubleBufHook:
         self.hooks: List = []
 
         self.auto_restart: bool = auto_restart
+
+        # Optional per-call forward-time instrumentation
+        self.enable_timing: bool = enable_timing
+        self._pending_starts: List = []          # stack of (idx, start_event)
+        self.timings: List = []                  # [(idx, elapsed_ms), ...]
+                                                  #   filled lazily; call get_timings_ms()
 
     # -------------------------------------------------------------------
     # Buffer allocation
@@ -251,6 +258,12 @@ class DoubleBufHook:
                             if n in bd and n in self.buf_layout[idx]:
                                 o, sh, nu = self.buf_layout[idx][n]
                                 bd[n].data = buf[o:o + nu].view(sh)
+
+                    # Optional timing: record forward-start event
+                    if self.enable_timing:
+                        start_ev = torch.cuda.Event(enable_timing=True)
+                        start_ev.record()
+                        self._pending_starts.append((idx, start_ev))
                 return hook_fn
 
             def make_post(idx):
@@ -258,6 +271,13 @@ class DoubleBufHook:
                     s = self._slot(idx)
                     # Mark slot's compute as done (for next prefetch WAR check)
                     self.compute_done[s].record()
+
+                    # Optional timing: pair with the matching pre-hook start event
+                    if self.enable_timing and self._pending_starts:
+                        p_idx, start_ev = self._pending_starts.pop()
+                        end_ev = torch.cuda.Event(enable_timing=True)
+                        end_ev.record()
+                        self.timings.append((p_idx, start_ev, end_ev))
 
                     # Restore CPU pinned pointer references
                     pd = dict(module.named_parameters())
@@ -298,3 +318,18 @@ class DoubleBufHook:
         for h in self.hooks:
             h.remove()
         self.hooks.clear()
+
+    def get_timings_ms(self) -> List:
+        """Return per-call forward times collected when enable_timing=True.
+
+        Each element is (layer_idx, elapsed_ms). Synchronizes the device once.
+        """
+        if not self.enable_timing:
+            return []
+        torch.cuda.synchronize()
+        return [(idx, start.elapsed_time(end)) for idx, start, end in self.timings]
+
+    def clear_timings(self) -> None:
+        """Discard collected timings without disabling instrumentation."""
+        self.timings.clear()
+        self._pending_starts.clear()

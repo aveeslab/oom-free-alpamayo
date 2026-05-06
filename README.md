@@ -1,4 +1,4 @@
-# OOM-free-alpamyo
+# oom-free-alpamayo
 
 Memory-efficient inference framework for **NVIDIA Alpamayo-R1** Vision-Language-Action (VLA) model on resource-constrained GPU platforms.
 
@@ -52,7 +52,7 @@ Follow NVIDIA's official instructions to install the Alpamayo-R1 Python package 
 
 ```bash
 git clone https://github.com/aveeslab/oom-free-alpamayo.git
-cd alpamayo-memory-optimizer
+cd oom-free-alpamayo
 pip install -e .
 ```
 
@@ -139,7 +139,7 @@ python scripts/infer.py --config config.json --output trajectory.json
 ## Project structure
 
 ```
-alpamayo-memory-optimizer/
+oom-free-alpamayo/
 ├── alpamayo_memopt/        # Python package
 │   ├── __init__.py
 │   ├── hook.py             # DoubleBufHook (DFB + pipelined prefetch)

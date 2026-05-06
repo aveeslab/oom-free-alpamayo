@@ -1,4 +1,4 @@
-"""alpamayo-memory-optimizer
+"""oom-free-alpamayo
 
 Memory-efficient inference framework for NVIDIA Alpamayo-R1 Vision-Language-Action
 model on resource-constrained GPU platforms.

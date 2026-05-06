@@ -27,24 +27,31 @@ _DEFAULT_DECODE_TOKENS = 21
 
 def per_layer_benefit_ms(
     vlm_layer_dma_ms: float,
+    vlm_layer_exe_ms: float = 0.0,
     num_decode_tokens: int = _DEFAULT_DECODE_TOKENS,
 ) -> float:
     """Per-resident-layer inference-time saving (ms).
 
-    For DMA-intensive VLM Decode regime, each resident VLM layer eliminates
-    `num_decode_tokens` DMA transfers worth of time.
+    Paper formula:
+        slope = R_decode * (C_DMA - C_EXE)
+    where C_DMA - C_EXE is the per-call time saved by making a VLM Decode
+    layer resident (DMA-intensive regime, EXE was previously hidden under DMA).
     """
-    return num_decode_tokens * vlm_layer_dma_ms
+    delta_c = max(0.0, vlm_layer_dma_ms - vlm_layer_exe_ms)
+    return num_decode_tokens * delta_c
 
 
 def predict_inference_time(
     num_resident: int,
     full_offload_time_s: float,
     vlm_layer_dma_ms: float,
+    vlm_layer_exe_ms: float = 0.0,
     num_decode_tokens: int = _DEFAULT_DECODE_TOKENS,
 ) -> float:
     """Predict E2E inference time (s) for `num_resident` VLM layers."""
-    slope_ms = per_layer_benefit_ms(vlm_layer_dma_ms, num_decode_tokens)
+    slope_ms = per_layer_benefit_ms(
+        vlm_layer_dma_ms, vlm_layer_exe_ms, num_decode_tokens
+    )
     saved_s = num_resident * slope_ms / 1000
     return max(0.0, full_offload_time_s - saved_s)
 
