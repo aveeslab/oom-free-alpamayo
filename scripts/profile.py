@@ -32,9 +32,14 @@ from pathlib import Path
 import torch
 
 # Ensure the package is importable when run as a script.
-_PKG_ROOT = Path(__file__).resolve().parent.parent
-if str(_PKG_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PKG_ROOT))
+_THIS_DIR = str(Path(__file__).resolve().parent)
+_PKG_ROOT = str(Path(__file__).resolve().parent.parent)
+# Remove the script's own directory from sys.path; otherwise namespace-package
+# discovery via this directory can collide with the transformers lazy loader
+# and trigger spurious "cannot import name 'GenerationMixin'" errors.
+sys.path[:] = [p for p in sys.path if p != _THIS_DIR]
+if _PKG_ROOT not in sys.path:
+    sys.path.insert(0, _PKG_ROOT)
 
 from alpamayo_memopt import DoubleBufHook
 from alpamayo_memopt import config as cfg
@@ -142,7 +147,20 @@ def _prepare_sample_inputs(model):
             "with its dataset dependencies."
         ) from e
 
-    avdi = physical_ai_av.PhysicalAIAVDatasetInterface()
+    # Try cached revisions first (HF default revision can fail with IndexError
+    # on metadata fetch); fall back to default last.
+    avdi = None
+    for rev in [
+        "2ae73f49ffd2b5db43b404201beb7b92889f7afc",
+        "37a7cc2c868d684d0456b5412a7ec5d18597a96a",
+    ]:
+        try:
+            avdi = physical_ai_av.PhysicalAIAVDatasetInterface(revision=rev)
+            break
+        except Exception:
+            continue
+    if avdi is None:
+        avdi = physical_ai_av.PhysicalAIAVDatasetInterface()
     data = load_physical_aiavdataset(
         "030c760c-ae38-49aa-9ad8-f5650a545d26", t0_us=5_100_000, avdi=avdi
     )

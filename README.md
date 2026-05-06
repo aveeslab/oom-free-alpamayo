@@ -8,9 +8,9 @@ Alpamayo-R1-10B requires 21.52 GB of VRAM, exceeding the 12–16 GB capacity of 
 
 ## Performance
 
-| Platform | Baseline (Accelerate offloading) | Ours | Speedup |
+| Platform | Baseline | Ours | Speedup |
 |---|---|---|---|
-| RTX 5070 Ti (16 GB) | 14.52 s | **4.09 s** | **3.55×** |
+| RTX 5070 Ti (16 GB) | OOM | **4.09 s** | **3.55×** |
 
 ## How it works
 
@@ -166,7 +166,7 @@ hook.remove()
 @inproceedings{roh2026alpamayo,
   title     = {Memory-Efficient Deployment of Vision-Language-Action Models
                on Resource-Constrained GPU Platforms},
-  author    = {Roh, Seungwoo and Kim, Jong-Chan},
+  author    = {Roh, Seungwoo and Kim, Huiyeong and Kim, Jong-Chan},
   booktitle = {Proc. IEEE Real-Time Computing Systems and Applications (RTCSA)},
   year      = {2026}
 }
