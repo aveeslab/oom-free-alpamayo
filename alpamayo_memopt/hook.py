@@ -39,9 +39,12 @@ class DoubleBufHook:
                       automatically resubmits DMAs for the next iteration.
                       Set True for repeated modules (VLM Decode, Diffusion
                       Expert) and False for single-shot modules (ViT).
+        device:       CUDA device used for DFB buffers, streams, and events.
     """
 
-    def __init__(self, auto_restart: bool = True) -> None:
+    def __init__(self, auto_restart: bool = True, device: str | torch.device = "cuda") -> None:
+        self.device = torch.device(device)
+
         # CPU-side pinned storage
         self.cpu_params: dict = {}     # idx -> {name: pinned_tensor}
         self.cpu_buffers: dict = {}    # idx -> {name: pinned_tensor}
@@ -58,11 +61,12 @@ class DoubleBufHook:
         self._pos: dict = {}           # idx -> position in offload_indices
 
         # CUDA streams and events
-        self.prefetch_stream: torch.cuda.Stream = torch.cuda.Stream()
+        with torch.cuda.device(self.device):
+            self.prefetch_stream: torch.cuda.Stream = torch.cuda.Stream(device=self.device)
+            self.compute_done: List[torch.cuda.Event] = [
+                torch.cuda.Event(), torch.cuda.Event()
+            ]
         self.dma_done: dict = {}                       # idx -> event
-        self.compute_done: List[torch.cuda.Event] = [
-            torch.cuda.Event(), torch.cuda.Event()
-        ]
 
         # Registered PyTorch hooks (for cleanup)
         self.hooks: List = []
@@ -77,10 +81,11 @@ class DoubleBufHook:
         """Allocate two independent GPU buffers of `max_elements` BF16 elements."""
         for s in range(2):
             self.gpu_bufs[s] = torch.empty(
-                max_elements, dtype=torch.bfloat16, device="cuda"
+                max_elements, dtype=torch.bfloat16, device=self.device
             )
+        stream = torch.cuda.current_stream(self.device)
         for ev in self.compute_done:
-            ev.record()
+            ev.record(stream)
 
     def set_bufs(
         self,
@@ -98,8 +103,9 @@ class DoubleBufHook:
             self.compute_done = list(compute_done)
         if prefetch_stream is not None:
             self.prefetch_stream = prefetch_stream
+        stream = torch.cuda.current_stream(self.device)
         for ev in self.compute_done:
-            ev.record()
+            ev.record(stream)
 
     # -------------------------------------------------------------------
     # Layer pinning
@@ -225,7 +231,7 @@ class DoubleBufHook:
 
                     # RAW: wait until DMA is done for this layer
                     if idx in self.dma_done:
-                        torch.cuda.current_stream().wait_event(self.dma_done[idx])
+                        torch.cuda.current_stream(self.device).wait_event(self.dma_done[idx])
                         del self.dma_done[idx]
                     else:
                         # Fallback: synchronous copy if DMA not yet submitted
@@ -257,7 +263,7 @@ class DoubleBufHook:
                 def hook_fn(module, inp, out):
                     s = self._slot(idx)
                     # Mark slot's compute as done (for next prefetch WAR check)
-                    self.compute_done[s].record()
+                    self.compute_done[s].record(torch.cuda.current_stream(self.device))
 
                     # Restore CPU pinned pointer references
                     pd = dict(module.named_parameters())
@@ -290,8 +296,9 @@ class DoubleBufHook:
     def reset(self) -> None:
         """Clear DMA state between inference iterations."""
         self.dma_done.clear()
+        stream = torch.cuda.current_stream(self.device)
         for ev in self.compute_done:
-            ev.record()
+            ev.record(stream)
 
     def remove(self) -> None:
         """Remove all registered forward hooks."""

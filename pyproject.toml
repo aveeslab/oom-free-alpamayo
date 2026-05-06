@@ -3,9 +3,9 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "alpamayo-memory-optimizer"
+name = "alpamayo15-memory-optimizer"
 version = "0.1.0"
-description = "Memory-efficient inference for NVIDIA Alpamayo-R1 Vision-Language-Action model on resource-constrained GPU platforms"
+description = "Memory-efficient inference adapter for NVIDIA Alpamayo 1.5 Vision-Language-Action model on resource-constrained GPU platforms"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -48,9 +48,9 @@ Homepage = "https://github.com/aveeslab/alpamayo-memory-optimizer"
 Repository = "https://github.com/aveeslab/alpamayo-memory-optimizer"
 Issues = "https://github.com/aveeslab/alpamayo-memory-optimizer/issues"
 
-# Note: Alpamayo-R1 itself (the model package and weights) must be installed
-# separately from NVIDIA's official channel — see README. This project does
-# not redistribute Alpamayo source or weights.
+# Note: Alpamayo 1.5 source and weights must be available separately. This
+# project imports the local Alpamayo 1.5 source path and does not redistribute
+# source, datasets, or model weights.
 
 [tool.setuptools.packages.find]
 include = ["alpamayo_memopt*"]

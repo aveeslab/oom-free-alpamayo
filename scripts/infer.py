@@ -1,4 +1,4 @@
-"""Run Alpamayo-R1 inference using a saved residency config.
+"""Run Alpamayo 1.5 inference using a saved residency config.
 
 Usage:
     python scripts/infer.py --config config.json
@@ -7,9 +7,9 @@ Usage:
 
 The script:
     1. Loads the config produced by scripts/profile.py.
-    2. Loads Alpamayo-R1, moves non-VLM essentials to GPU.
+    2. Loads Alpamayo 1.5, moves non-VLM modules to GPU.
     3. Loads resident VLM layers (per config) directly to GPU.
-    4. Pins remaining (offload) VLM layers to host pinned memory and
+    4. Pins remaining VLM layers to host pinned memory and
        installs DoubleBufHook for asynchronous prefetch via DFB.
     5. Runs inference, prints timing, and optionally writes output trajectories.
 """
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -33,6 +34,7 @@ if _PKG_ROOT not in sys.path:
     sys.path.insert(0, _PKG_ROOT)
 
 from alpamayo_memopt import DoubleBufHook, load_config
+from alpamayo_memopt import alpamayo15
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -41,7 +43,7 @@ from alpamayo_memopt import DoubleBufHook, load_config
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Run Alpamayo-R1 inference with saved residency config."
+        description="Run Alpamayo 1.5 inference with saved residency config."
     )
     p.add_argument("--config", "-c", type=Path, required=True,
                    help="Path to config.json produced by scripts/profile.py")
@@ -53,106 +55,43 @@ def parse_args() -> argparse.Namespace:
                    help=("Optional input JSON. If omitted, the standard Alpamayo "
                          "benchmark sample is used."))
     p.add_argument("--output", "-o", type=Path, default=None,
-                   help="Optional output path for predicted trajectories (JSON).")
+                   help="Optional output path for trajectories (JSON).")
     p.add_argument("--device", type=int, default=0, help="CUDA device index.")
+    p.add_argument("--alpamayo-src", type=Path, default=None,
+                   help=("Path to Alpamayo 1.5 src directory. Defaults to the "
+                         "ALPAMAYO15_SRC env var, then the source path saved "
+                         "in config, then an installed alpamayo1_5 package."))
+    p.add_argument("--model-id", default=None,
+                   help=("Optional model id/path override. Defaults to "
+                         "ALPAMAYO15_MODEL_ID, then the config model name."))
+    p.add_argument("--model-cache-dir", type=Path, default=None,
+                   help=("Optional HuggingFace/Transformers cache_dir. Defaults to "
+                         "ALPAMAYO15_MODEL_CACHE_DIR, then the config value."))
+    p.add_argument("--model-revision", default=None,
+                   help=("Optional model revision passed to from_pretrained. Defaults "
+                         "to ALPAMAYO15_MODEL_REVISION, then the config value."))
+    p.add_argument("--local-files-only", action=argparse.BooleanOptionalAction,
+                   default=None,
+                   help=("Pass local_files_only to from_pretrained. Defaults to "
+                         "ALPAMAYO15_LOCAL_FILES_ONLY, then the config value."))
+    p.add_argument("--attn-implementation", default=None,
+                   help="Optional Transformers attention implementation override, e.g. eager.")
+    p.add_argument("--clip-id", default=None,
+                   help=("physical_ai_av clip id. Defaults to ALPAMAYO15_CLIP_ID, "
+                         "then the config value."))
+    p.add_argument("--t0-us", type=int, default=None,
+                   help=("physical_ai_av timestamp. Defaults to ALPAMAYO15_T0_US, "
+                         "then the config value."))
+    p.add_argument("--dataset-revision", dest="dataset_revisions", action="append",
+                   default=None,
+                   help=("physical_ai_av revision candidate. Can be repeated or "
+                         "comma-separated. Defaults to ALPAMAYO15_DATASET_REVISIONS, "
+                         "then the config value."))
+    p.add_argument("--num-traj-samples", type=int, default=1,
+                   help="Trajectory samples per inference (default: 1).")
+    p.add_argument("--max-generation-length", type=int, default=256,
+                   help="VLM max_new_tokens per inference (default: 256).")
     return p.parse_args()
-
-
-# ─────────────────────────────────────────────────────────────────────
-# Model glue (Alpamayo-specific)
-# ─────────────────────────────────────────────────────────────────────
-
-def _load_alpamayo():
-    """Load Alpamayo-R1 onto CPU and return (model, vlm_layers)."""
-    try:
-        from alpamayo_r1.models.alpamayo_r1 import AlpamayoR1
-    except ImportError as e:
-        raise ImportError(
-            "alpamayo_r1 package not found. Install Alpamayo-R1 first."
-        ) from e
-
-    model = AlpamayoR1.from_pretrained(
-        "nvidia/Alpamayo-R1-10B",
-        dtype=torch.bfloat16,
-        device_map="cpu",
-        low_cpu_mem_usage=True,
-    )
-    model.eval()
-    vlm_layers = model.vlm.model.language_model.layers
-    return model, vlm_layers
-
-
-def _setup_non_vlm_essentials(model) -> None:
-    """Move non-VLM-layer essentials (embed, norm, lm_head, ViT, Expert
-    non-layers, diffusion) to GPU."""
-    lm = model.vlm.model.language_model
-    visual = model.vlm.model.visual
-
-    lm.embed_tokens.to("cuda")
-    lm.norm.to("cuda")
-    lm.rotary_emb.to("cuda")
-    model.vlm.lm_head.to("cuda")
-
-    for attr in ("action_in_proj", "action_out_proj", "diffusion"):
-        if hasattr(model, attr):
-            getattr(model, attr).to("cuda")
-
-    for n, m in visual.named_children():
-        if n != "blocks":
-            m.to("cuda")
-    for b in visual.blocks:
-        b.to("cuda")
-
-    for n, child in model.expert.named_children():
-        if n != "layers":
-            child.to("cuda")
-    for n, p in model.expert.named_parameters():
-        if "layers." not in n and p.device.type == "cpu":
-            p.data = p.data.to("cuda")
-    for n, b in model.expert.named_buffers():
-        if "layers." not in n and b.device.type == "cpu":
-            b.data = b.data.to("cuda")
-
-
-def _prepare_default_inputs(model):
-    """Prepare the standard Alpamayo benchmark sample as inference input."""
-    try:
-        from alpamayo_r1 import helper
-        from alpamayo_r1.load_physical_aiavdataset import load_physical_aiavdataset
-        import physical_ai_av
-    except ImportError as e:
-        raise ImportError(
-            "Alpamayo dataset utilities not available."
-        ) from e
-
-    # Try cached revisions first (HF default revision can fail with IndexError
-    # on metadata fetch); fall back to default last.
-    avdi = None
-    for rev in [
-        "2ae73f49ffd2b5db43b404201beb7b92889f7afc",
-        "37a7cc2c868d684d0456b5412a7ec5d18597a96a",
-    ]:
-        try:
-            avdi = physical_ai_av.PhysicalAIAVDatasetInterface(revision=rev)
-            break
-        except Exception:
-            continue
-    if avdi is None:
-        avdi = physical_ai_av.PhysicalAIAVDatasetInterface()
-    data = load_physical_aiavdataset(
-        "030c760c-ae38-49aa-9ad8-f5650a545d26", t0_us=5_100_000, avdi=avdi
-    )
-    messages = helper.create_message(data["image_frames"].flatten(0, 1))
-    processor = helper.get_processor(model.tokenizer)
-    inputs = processor.apply_chat_template(
-        messages, tokenize=True, add_generation_prompt=False,
-        continue_final_message=True, return_dict=True, return_tensors="pt",
-    )
-    return helper.to_device({
-        "tokenized_data": inputs,
-        "ego_history_xyz": data["ego_history_xyz"],
-        "ego_history_rot": data["ego_history_rot"],
-    }, "cuda")
 
 
 def _serialize_output(out, path: Path) -> None:
@@ -175,8 +114,10 @@ def _serialize_output(out, path: Path) -> None:
 
 def main() -> int:
     args = parse_args()
+    torch.cuda.set_device(args.device)
+    device = f"cuda:{args.device}"
     print("=" * 60)
-    print("Alpamayo Memory Optimizer — Inference")
+    print("Alpamayo 1.5 Memory Optimizer - Inference")
     print("=" * 60)
 
     # 1. Load config
@@ -186,7 +127,6 @@ def main() -> int:
     print(f"    VRAM budget          : {config.system.vram_budget_gb:.2f} GB")
     print(f"    Resident layers      : {config.residency.num_resident} "
           f"of {config.model.vlm_layers}")
-    print(f"    Predicted time       : {config.predicted_performance.inference_time_s:.3f} s")
 
     # GPU sanity check
     actual_gpu = torch.cuda.get_device_properties(args.device).name
@@ -195,31 +135,103 @@ def main() -> int:
               f"'{config.system.gpu_name}'. Performance may vary.")
 
     # 2. Load model
-    print("\n[2] Loading Alpamayo-R1-10B (CPU)...")
-    model, vlm_layers = _load_alpamayo()
+    config_source_path = config.model.alpamayo_source_path or None
+    if config_source_path and not Path(config_source_path).expanduser().exists():
+        print(f"    [!] Config source path not found, ignoring: {config_source_path}")
+        config_source_path = None
+    alpamayo_src = alpamayo15.resolve_alpamayo15_source_path(
+        args.alpamayo_src,
+        config_source_path=config_source_path,
+    )
+    model_id = (
+        args.model_id
+        or os.environ.get(alpamayo15.ENV_MODEL_ID)
+        or config.model.name
+        or alpamayo15.FALLBACK_MODEL_ID
+    )
+    model_cache_dir = (
+        args.model_cache_dir
+        or alpamayo15.DEFAULT_MODEL_CACHE_DIR
+        or (Path(config.model.model_cache_dir).expanduser()
+            if config.model.model_cache_dir else None)
+    )
+    model_revision = (
+        args.model_revision
+        or os.environ.get(alpamayo15.ENV_MODEL_REVISION)
+        or config.model.model_revision
+        or None
+    )
+    if args.local_files_only is not None:
+        local_files_only = args.local_files_only
+    elif os.environ.get(alpamayo15.ENV_LOCAL_FILES_ONLY) is not None:
+        local_files_only = alpamayo15.DEFAULT_LOCAL_FILES_ONLY
+    else:
+        local_files_only = config.model.local_files_only
+    attn_implementation = (
+        args.attn_implementation
+        or os.environ.get(alpamayo15.ENV_ATTN_IMPLEMENTATION)
+        or config.model.attn_implementation
+        or None
+    )
+    clip_id = (
+        args.clip_id
+        or os.environ.get(alpamayo15.ENV_CLIP_ID)
+        or config.model.clip_id
+        or alpamayo15.FALLBACK_CLIP_ID
+    )
+    if args.t0_us is not None:
+        t0_us = args.t0_us
+    elif os.environ.get(alpamayo15.ENV_T0_US) is not None:
+        t0_us = alpamayo15.DEFAULT_T0_US
+    else:
+        t0_us = config.model.t0_us or alpamayo15.FALLBACK_T0_US
+    if (
+        args.dataset_revisions is not None
+        or os.environ.get(alpamayo15.ENV_DATASET_REVISIONS)
+        or os.environ.get(alpamayo15.ENV_DATASET_REVISION)
+    ):
+        dataset_revisions = alpamayo15.resolve_dataset_revisions(args.dataset_revisions)
+    elif config.model.dataset_revisions:
+        dataset_revisions = tuple(config.model.dataset_revisions)
+    else:
+        dataset_revisions = alpamayo15.resolve_dataset_revisions(())
+
+    print("\n[2] Loading Alpamayo 1.5 (CPU)...")
+    model, vlm_layers, expert_layers = alpamayo15.load_alpamayo15(
+        source_path=alpamayo_src,
+        model_id=model_id,
+        attn_implementation=attn_implementation,
+        cache_dir=model_cache_dir,
+        revision=model_revision,
+        local_files_only=local_files_only,
+    )
     if len(vlm_layers) != config.model.vlm_layers:
         print(f"    [!] VLM layer count mismatch: model has {len(vlm_layers)}, "
               f"config expects {config.model.vlm_layers}", file=sys.stderr)
         return 2
+    if config.model.expert_layers and len(expert_layers) != config.model.expert_layers:
+        print(f"    [!] Expert layer count mismatch: model has {len(expert_layers)}, "
+              f"config expects {config.model.expert_layers}", file=sys.stderr)
+        return 2
 
-    # 3. Setup non-VLM essentials on GPU
+    # 3. Setup non-VLM modules on GPU
     print("\n[3] Setting up non-VLM components on GPU...")
-    _setup_non_vlm_essentials(model)
+    alpamayo15.setup_non_layer_components(model, device=device)
 
     # 4. Move resident VLM layers to GPU
     resident_indices = set(config.residency.resident_indices)
     offload_indices = sorted(set(range(len(vlm_layers))) - resident_indices)
     print(f"\n[4] Loading {len(resident_indices)} resident VLM layers to GPU...")
     for i in resident_indices:
-        vlm_layers[i].to("cuda")
+        vlm_layers[i].to(device)
 
     # 5. Pin offload layers + DoubleBufHook
     print(f"\n[5] Pinning {len(offload_indices)} offload VLM layers + "
           "installing DoubleBufHook...")
-    hook = DoubleBufHook(auto_restart=True)
-    hook.pin(vlm_layers, offload_indices)
-    hook.allocate(hook.max_elements())
-    hook.register(vlm_layers, offload_indices)
+    vlm_hook = DoubleBufHook(auto_restart=True, device=device)
+    vlm_hook.pin(vlm_layers, offload_indices)
+    vlm_hook.allocate(vlm_hook.max_elements())
+    vlm_hook.register(vlm_layers, offload_indices)
     torch.cuda.synchronize()
     peak_after_setup_gb = torch.cuda.memory_allocated(args.device) / (1024 ** 3)
     print(f"    VRAM after setup     : {peak_after_setup_gb:.2f} GB "
@@ -235,7 +247,14 @@ def main() -> int:
             "Custom --input not yet supported. Run without --input to use the "
             "default Alpamayo benchmark sample."
         )
-    inputs = _prepare_default_inputs(model)
+    inputs = alpamayo15.prepare_default_inputs(
+        model,
+        alpamayo_src,
+        device=device,
+        clip_id=clip_id,
+        t0_us=t0_us,
+        dataset_revisions=dataset_revisions,
+    )
 
     # 7. Run inference (warmup + timed iterations)
     print(f"\n[7] Running inference: {args.warmup} warmup + "
@@ -243,9 +262,14 @@ def main() -> int:
 
     @torch.no_grad()
     def _run_once():
-        hook.start()
-        out = model.sample_trajectories_from_data_with_vlm_rollout(**inputs)
-        hook.reset()
+        vlm_hook.start()
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            out = model.sample_trajectories_from_data_with_vlm_rollout(
+                data=inputs,
+                num_traj_samples=args.num_traj_samples,
+                max_generation_length=args.max_generation_length,
+            )
+        vlm_hook.reset()
         return out
 
     for _ in range(args.warmup):
@@ -267,10 +291,6 @@ def main() -> int:
         std_s = (sum((t - mean_s) ** 2 for t in times) / len(times)) ** 0.5
         print(f"\n    Mean inference time  : {mean_s:.3f} s "
               f"(std {std_s:.3f}, n={len(times)})")
-        print(f"    Predicted (config)   : "
-              f"{config.predicted_performance.inference_time_s:.3f} s")
-        print(f"    Δ vs predicted       : "
-              f"{(mean_s - config.predicted_performance.inference_time_s) * 1000:+.1f} ms")
 
     # 8. Save output if requested
     if args.output is not None and last_out is not None:
@@ -278,7 +298,7 @@ def main() -> int:
         _serialize_output(last_out, args.output)
 
     # Cleanup
-    hook.remove()
+    vlm_hook.remove()
 
     print("\nDone.")
     return 0

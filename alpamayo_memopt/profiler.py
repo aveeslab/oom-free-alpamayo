@@ -100,25 +100,28 @@ def measure_h2d_bandwidth_gbps(
     size_mb: int = 256,
     num_trials: int = 5,
     warmup: int = 2,
+    device: str | torch.device = "cuda",
 ) -> float:
     """Measure pinned-memory H2D PCIe bandwidth in GB/s."""
+    device = torch.device(device)
     elements = size_mb * 1024 * 1024 // 2  # bfloat16 = 2 bytes
     cpu_pinned = torch.empty(elements, dtype=torch.bfloat16).pin_memory()
     cpu_pinned.uniform_(-1, 1)
-    gpu_buf = torch.empty(elements, dtype=torch.bfloat16, device="cuda")
+    gpu_buf = torch.empty(elements, dtype=torch.bfloat16, device=device)
 
     # Warmup
     for _ in range(warmup):
         gpu_buf.copy_(cpu_pinned, non_blocking=True)
-    torch.cuda.synchronize()
+    torch.cuda.synchronize(device)
 
-    starts = [torch.cuda.Event(enable_timing=True) for _ in range(num_trials)]
-    ends = [torch.cuda.Event(enable_timing=True) for _ in range(num_trials)]
+    with torch.cuda.device(device):
+        starts = [torch.cuda.Event(enable_timing=True) for _ in range(num_trials)]
+        ends = [torch.cuda.Event(enable_timing=True) for _ in range(num_trials)]
     for i in range(num_trials):
         starts[i].record()
         gpu_buf.copy_(cpu_pinned, non_blocking=True)
         ends[i].record()
-    torch.cuda.synchronize()
+    torch.cuda.synchronize(device)
 
     elapsed_ms = [starts[i].elapsed_time(ends[i]) for i in range(num_trials)]
     avg_ms = sum(elapsed_ms) / num_trials
@@ -164,23 +167,23 @@ def measure_current_vram_gb(device_index: int = 0) -> float:
 # Sequential DL one-shot profiling
 # ─────────────────────────────────────────────────────────────────────
 
-def run_sequential_dl_profile(inference_fn) -> dict:
+def run_sequential_dl_profile(inference_fn, device_index: int = 0) -> dict:
     """Execute `inference_fn` once with timing instrumentation.
 
     `inference_fn` must perform a full inference pass with all VLM layers
     offloaded (Nr=0) using DoubleBufHook. Returns wall-clock total + peak VRAM.
     """
-    torch.cuda.reset_peak_memory_stats()
-    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats(device_index)
+    torch.cuda.synchronize(device_index)
 
     t0 = time.perf_counter()
     inference_fn()
-    torch.cuda.synchronize()
+    torch.cuda.synchronize(device_index)
     t1 = time.perf_counter()
 
     return {
         "full_offload_time_s": t1 - t0,
-        "peak_vram_gb": torch.cuda.max_memory_allocated() / (1024 ** 3),
+        "peak_vram_gb": torch.cuda.max_memory_allocated(device_index) / (1024 ** 3),
     }
 
 
@@ -227,7 +230,7 @@ def interleaved_placement(k: int, total_layers: int = 36) -> List[int]:
 
     Args:
         k:             Total resident layer count (≥ 1).
-        total_layers:  Number of VLM layers (e.g., 36 for Alpamayo-R1).
+        total_layers:  Number of VLM or Expert layers.
 
     Returns:
         Sorted list of resident layer indices, length = k (or fewer if k > N).

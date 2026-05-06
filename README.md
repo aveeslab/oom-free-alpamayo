@@ -1,196 +1,239 @@
-# OOM-free-alpamyo
+# OOM-free Alpamayo 1.5
 
-Memory-efficient inference framework for **NVIDIA Alpamayo-R1** Vision-Language-Action (VLA) model on resource-constrained GPU platforms.
+Memory-efficient inference adapter for **NVIDIA Alpamayo 1.5** using the
+existing Alpamayo 1.5 source tree or an installed `alpamayo1_5` package.
 
-> ✓ Accepted at **IEEE RTCSA 2026**
+This directory is a copy of the small `oom-free-alpamayo` framework, ported so
+that model code and model weights are not copied here. At runtime it imports the
+Alpamayo 1.5 source path and loads `nvidia/Alpamayo-1.5-10B` through
+`from_pretrained`.
 
-Alpamayo-R1-10B requires 21.52 GB of VRAM, exceeding the 12–16 GB capacity of consumer-grade GPUs. This framework enables memory-efficient inference on such GPUs through **system-level optimization alone — no model modification, no quantization, no pruning**.
+## What Changed
 
-## Performance
+- Uses `alpamayo1_5.models.alpamayo1_5.Alpamayo1_5`.
+- Defaults to `nvidia/Alpamayo-1.5-10B`.
+- Uses the Alpamayo 1.5 example dataset/input formatting, including camera ids.
+- Applies demand-layering hooks to `model.vlm.model.language_model.layers`.
+- Keeps non-VLM modules, including the Expert module, on GPU.
+- Keeps Expert layer count/size in `config.json` as metadata only.
+- Removes inference-time prediction and speedup reporting from the runtime
+  output and config schema.
+- Provides a platform-editable `run.sh` launcher.
 
-| Platform | Baseline | Ours |
-|---|---|---|
-| RTX 5070 Ti (16 GB) | OOM | **4.09 s** |
+## How It Works
 
-### Platform comparison
+This project wraps an existing Alpamayo 1.5 installation instead of vendoring
+model code or weights. The runtime flow is:
 
-<!-- Fill in OOM or measured inference time for each platform. -->
+1. Import `alpamayo1_5` from `--alpamayo-src`, `ALPAMAYO15_SRC`, or the active
+   Python environment.
+2. Load `Alpamayo1_5.from_pretrained(...)` on CPU.
+3. Move non-VLM modules, including the Expert module, to GPU.
+4. Keep selected VLM transformer layers resident on GPU.
+5. Keep the remaining VLM layers in CPU pinned memory.
+6. Use `DoubleBufHook` to prefetch offloaded VLM layers into a double GPU
+   buffer immediately before each layer forward.
+7. Run the original Alpamayo 1.5
+   `sample_trajectories_from_data_with_vlm_rollout(...)` method.
 
-| Platform | VRAM | Baseline | Ours | Notes |
-|---|---:|---:|---:|---|
-| RTX 5070 Ti | 16 GB | OOM | `-- s` |  |
-| RTX 3080 Ti | 12 GB | OOM | `-- s` |  |
-| RTX 3090 | 24 GB | OOM | `-- s` |  |
+The two user-facing scripts match that flow:
 
-## How it works
+- `scripts/profile.py` measures the current machine and writes a residency
+  config.
+- `scripts/infer.py` loads that config and runs OOM-free inference.
+- `run.sh` is a thin launcher around `scripts/infer.py`.
 
-Three coordinated optimizations:
+Run `scripts/profile.py` again on each target platform. GPU VRAM, PCIe
+bandwidth, attention peak memory, and CPU memory differ across machines, so a
+config generated on one platform is not guaranteed to fit another one.
 
-1. **Sequential Demand Layering** — reduces VRAM usage from model-level (21.5 GB) to layer-level granularity by loading layer parameters on demand.
-2. **Pipelined Demand Layering** — two-slot GPU buffer + dedicated prefetch CUDA stream hides H2D parameter transfer behind layer execution time.
-3. **GPU-Resident Layer Decision Policy** — selectively keeps the most beneficial VLM layers permanently on the GPU using **interleaved residency placement** (paper Eq. 8). Eliminates the residual transfer overhead that pipelining cannot hide for DMA-intensive modules (e.g., VLM Decode, r ≈ 12).
+The config is still required, but it is no longer used for predicted inference
+time. It stores the actual runtime placement and platform settings: VRAM
+budget, VLM resident layer indices, model/source path, and input defaults.
 
-A linear residency-benefit prediction model selects the optimal resident-layer count from a single profiling run, validated within **1.3 % prediction error**.
+## Install
 
-## Requirements
-
-- NVIDIA GPU with ≥ 12 GB VRAM (12 GB tested on RTX 3080 Ti, 16 GB on RTX 5070 Ti)
-- CUDA 12.x
-- Python ≥ 3.10
-- PyTorch ≥ 2.0
-- CPU DRAM large enough to hold the full model weights (≥ 22 GB recommended)
-- **NVIDIA Alpamayo-R1 source** (installed separately, Apache 2.0)
-- **Alpamayo-R1-10B model weights** (subject to NVIDIA's separate model license)
-
-## Installation
-
-### 1. Install Alpamayo-R1 (separate dependency)
-
-Follow NVIDIA's official instructions to install the Alpamayo-R1 Python package and download the `nvidia/Alpamayo-R1-10B` weights.
-
-### 2. Install this framework
+From this directory:
 
 ```bash
-git clone https://github.com/aveeslab/oom-free-alpamayo.git
-cd alpamayo-memory-optimizer
 pip install -e .
 ```
 
-For development:
+Alpamayo 1.5 dependencies still need to be installed in the same environment.
+No local model/source paths are required in this repository. Set them per
+machine with environment variables or command-line options:
 
 ```bash
-pip install -e ".[dev]"
+export ALPAMAYO15_SRC=/path/to/alpamayo1.5/src
+export ALPAMAYO15_MODEL_ID=nvidia/Alpamayo-1.5-10B
+export ALPAMAYO15_MODEL_CACHE_DIR=/path/to/hf/cache
+export ALPAMAYO15_ATTN_IMPLEMENTATION=eager
+export ALPAMAYO15_CLIP_ID=030c760c-ae38-49aa-9ad8-f5650a545d26
+export ALPAMAYO15_T0_US=5100000
+export ALPAMAYO15_DATASET_REVISIONS=2ae73f49ffd2b5db43b404201beb7b92889f7afc,37a7cc2c868d684d0456b5412a7ec5d18597a96a
 ```
 
-## Quick Start
-
-The framework operates in two stages: **profile** (one-time per machine) → **infer** (repeatable).
-
-### Step 1: Profile your system
+or per command:
 
 ```bash
-python scripts/profile.py --output config.json
+python3 scripts/profile.py --alpamayo-src /path/to/alpamayo1.5/src
 ```
 
-The profiler will:
+If `alpamayo1_5` is already importable in the active Python environment,
+`--alpamayo-src`/`ALPAMAYO15_SRC` can be omitted.
 
-1. Detect CPU DRAM total and verify it can hold all model weights.
-2. Detect GPU VRAM total. By default, the budget is `total − 1 GB` (override with `--vram-budget`).
-3. Load the model, run **Sequential Demand Layering** once with all VLM layers offloaded.
-4. Compute the maximum number of resident VLM layers that fit in VRAM, apply a conservative margin of **−2** layers, and select indices via interleaved placement.
-5. Predict the inference time and save the configuration.
+## Apply on a New Platform
 
-Example output:
-
-```
-[1] Detecting system specifications...
-    CPU DRAM total : 32.00 GB
-    GPU            : NVIDIA GeForce RTX 5070 Ti
-    VRAM total     : 16.30 GB
-    VRAM budget    : 15.30 GB
-
-[2] Loading Alpamayo-R1-10B (CPU)...
-    Model weights total : 21.52 GB
-    CPU DRAM check       : OK
-
-...
-
-[5] Residency planning...
-    Max possible         : 31
-    Conservative (-2)    : 29
-    Resident indices     : [0, 1, 3, 4, ...]
-
-    Predicted time       : 4.20 s
-    Speedup vs baseline  : 3.46× (baseline 14.52 s)
-
-[6] Saving config...
-    Config saved to      : config.json
-```
-
-#### CLI options
-
-| Option | Default | Description |
-|---|---|---|
-| `--output / -o` | `config.json` | Output config path |
-| `--vram-budget` | `total − 1 GB` | Allowed VRAM in GB |
-| `--baseline-time` | `14.52` | Reference baseline (s) for speedup reporting |
-| `--decode-tokens` | `21` | Expected VLM decode token count |
-| `--margin` | `2` | Conservative resident-count margin |
-| `--device` | `0` | CUDA device index |
-
-### Step 2: Run optimal inference
+1. Make Alpamayo 1.5 available in the Python environment.
 
 ```bash
-python scripts/infer.py --config config.json
+cd /path/to/oom-free-alpamayo1_5
+pip install -e .
 ```
 
-Multiple iterations with timing statistics:
+2. Set platform-specific paths and defaults.
 
 ```bash
-python scripts/infer.py --config config.json --num-iterations 5
+export ALPAMAYO15_SRC=/path/to/alpamayo1.5/src
+export ALPAMAYO15_MODEL_ID=nvidia/Alpamayo-1.5-10B
+export ALPAMAYO15_MODEL_CACHE_DIR=/path/to/hf/cache
+export ALPAMAYO15_ATTN_IMPLEMENTATION=eager
 ```
 
-Save predicted trajectories:
+`env.example` contains the full set of optional variables, including dataset
+clip id, timestamp, dataset revisions, model revision, and local-only loading.
+
+3. Profile the target GPU and write a config.
 
 ```bash
-python scripts/infer.py --config config.json --output trajectory.json
+python3 scripts/profile.py \
+  --output config.json \
+  --margin 12
 ```
 
-## Project structure
+Use a larger `--margin` when inference still OOMs during attention or rollout.
+The margin reduces the number of resident VLM layers and leaves more VRAM for
+temporary tensors.
 
-```
-alpamayo-memory-optimizer/
-├── alpamayo_memopt/        # Python package
-│   ├── __init__.py
-│   ├── hook.py             # DoubleBufHook (DFB + pipelined prefetch)
-│   ├── profiler.py         # System / model / bandwidth profiling
-│   ├── predictor.py        # Linear residency-benefit prediction model
-│   └── config.py           # Config dataclass + JSON I/O
-├── scripts/
-│   ├── profile.py          # CLI: system profiling → config.json
-│   └── infer.py            # CLI: optimal inference using config.json
-├── pyproject.toml          # Package metadata (PEP 621)
-├── LICENSE                 # MIT
-├── NOTICE                  # Third-party attribution (Alpamayo Apache 2.0)
-└── README.md
+4. Edit `run.sh` for the target platform.
+
+Open `run.sh` and replace every required `please set this` value:
+
+```bash
+PYTHON_BIN="${PYTHON_BIN:-please set this}"
+ALPAMAYO_SRC="${ALPAMAYO_SRC:-${ALPAMAYO15_SRC:-please set this}}"
+CONFIG="${CONFIG:-please set this}"
 ```
 
-### Programmatic use
+For example:
 
-```python
-from alpamayo_memopt import DoubleBufHook, load_config
-
-config = load_config("config.json")
-hook = DoubleBufHook(auto_restart=True)
-hook.pin(vlm_layers, offload_indices)
-hook.allocate(hook.max_elements())
-hook.register(vlm_layers, offload_indices)
-hook.start()
-# model.inference(...)
-hook.remove()
+```bash
+PYTHON_BIN="${PYTHON_BIN:-/path/to/venv/bin/python}"
+ALPAMAYO_SRC="${ALPAMAYO_SRC:-/path/to/alpamayo1.5/src}"
+CONFIG="${CONFIG:-config.json}"
 ```
 
-## Citation
+If any required value is still `please set this`, `run.sh` exits before running
+inference and prints which value must be set. The same values can also be
+overridden without editing the file:
 
-```bibtex
-@inproceedings{roh2026alpamayo,
-  title     = {Memory-Efficient Deployment of Vision-Language-Action Models
-               on Resource-Constrained GPU Platforms},
-  author    = {Roh, Seungwoo and Kim, Huiyeong and Kim, Jong-Chan},
-  booktitle = {Proc. IEEE Real-Time Computing Systems and Applications (RTCSA)},
-  year      = {2026}
-}
+```bash
+PYTHON_BIN=/path/to/venv/bin/python \
+ALPAMAYO_SRC=/path/to/alpamayo1.5/src \
+CONFIG=config.json \
+./run.sh
 ```
 
-## License
+`ALPAMAYO_SRC` has priority over `ALPAMAYO15_SRC`. If `ALPAMAYO15_SRC` is
+already exported, `run.sh` can use it without duplicating the source path.
 
-This repository is released under the **MIT License** (see `LICENSE`).
+5. Run OOM-free inference.
 
-This work depends on, but does not redistribute, NVIDIA Alpamayo-R1 source
-(Apache 2.0) and the Alpamayo-R1-10B model weights (subject to NVIDIA's
-separate model license). See `NOTICE` for details.
+```bash
+./run.sh
+```
 
-## Acknowledgements
+The launcher defaults to:
 
-- AVEES Lab, Graduate School of Automobile and Mobility, Kookmin University
-- NVIDIA NVlabs for the Alpamayo-R1 model
+```bash
+ATTN_IMPLEMENTATION=eager
+DEVICE=0
+WARMUP=0
+NUM_ITERATIONS=1
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+```
+
+Override these per run as needed:
+
+```bash
+NUM_ITERATIONS=10 ./run.sh
+CONFIG=config.margin12.json ./run.sh
+DEVICE=1 ./run.sh
+```
+
+6. Optional: run the full-GPU baseline to confirm the original path OOMs.
+
+```bash
+python3 test_inference.py
+```
+
+`test_inference.py` intentionally uses the original full-GPU model path. It is
+for baseline/OOM checks, not the OOM-free path.
+
+## Profile
+
+```bash
+python3 scripts/profile.py --output config.json
+```
+
+Useful options:
+
+```bash
+python3 scripts/profile.py \
+  --output config.json \
+  --vram-budget 15.0 \
+  --attn-implementation eager \
+  --model-cache-dir /path/to/hf/cache \
+  --num-traj-samples 1 \
+  --max-generation-length 256
+```
+
+The planner only applies residency to VLM layers. Expert layers are not part of
+the residency/offload planner.
+
+## Infer
+
+Recommended launcher:
+
+```bash
+./run.sh
+```
+
+Direct invocation:
+
+```bash
+python3 scripts/infer.py --config config.json
+```
+
+Multiple timed iterations:
+
+```bash
+python3 scripts/infer.py --config config.json --num-iterations 5
+```
+
+Save trajectories:
+
+```bash
+python3 scripts/infer.py --config config.json --output trajectory.json
+```
+
+Inference output reports measured iteration times only. Predicted inference
+time, predicted-vs-actual delta, and speedup-vs-baseline reporting have been
+removed.
+
+## Notes
+
+- This repo does not copy Alpamayo 1.5 source, datasets, notebooks, or model
+  weights.
+- Full inference still requires CUDA, HuggingFace access to the gated model and
+  dataset, and enough CPU DRAM to hold the model weights.

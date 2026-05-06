@@ -1,12 +1,11 @@
-"""alpamayo-memory-optimizer
+"""alpamayo15-memory-optimizer
 
-Memory-efficient inference framework for NVIDIA Alpamayo-R1 Vision-Language-Action
+Memory-efficient inference adapter for NVIDIA Alpamayo 1.5 Vision-Language-Action
 model on resource-constrained GPU platforms.
 
 Main components:
     - DoubleBufHook: Pipelined Demand Layering with Double Flat Buffer
     - profiler:     System spec detection + per-layer profiling + config generation
-    - predictor:    Performance prediction model (interleaved residency placement)
     - config:       Config JSON serialization
 """
 
