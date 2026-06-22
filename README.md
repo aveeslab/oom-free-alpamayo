@@ -239,8 +239,8 @@ oom-free-alpamayo/
   title     = {OOM-Free Alpamayo via CPU-GPU Memory Swapping for
                Vision-Language-Action Models},
   author    = {Roh, Seungwoo and Kim, Huiyeong and Kim, Jong-Chan},
-  booktitle = {Proc. 32nd IEEE Int. Conf. on Embedded and Real-Time
-               Computing Systems and Applications (RTCSA)},
+  booktitle = {Proceedings of the 32nd IEEE International Conference on
+               Embedded and Real-Time Computing Systems and Applications (RTCSA)},
   year      = {2026},
   eprint        = {2605.11678},
   archivePrefix = {arXiv},
