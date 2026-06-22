@@ -59,21 +59,74 @@ def _split(value: str | None) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
-def _ensure_importable(src: str | Path | None):
-    """Add the Alpamayo 1.5 source path to sys.path and verify the import."""
-    if src:
-        src = Path(src).expanduser().resolve()
-        if not src.exists():
-            raise FileNotFoundError(f"Alpamayo 1.5 source path not found: {src}")
-        if str(src) not in sys.path:
-            sys.path.insert(0, str(src))
+def _auto_src_candidates() -> list[Path]:
+    """Well-known locations that may contain the ``alpamayo1_5`` source package.
+
+    Mirrors how the R1 path is picked up automatically: if the NVlabs
+    alpamayo1.5 repo (https://github.com/NVlabs/alpamayo1.5) is cloned in a
+    standard spot, no env var is needed.
+    """
+    repo_root = Path(__file__).resolve().parents[2]   # oom-free-alpamayo/
+    roots = [
+        Path.cwd(),
+        repo_root, repo_root.parent,
+        Path.home() / "workspace",
+        Path.home(),
+    ]
+    cands: list[Path] = []
+    for r in roots:
+        cands += [r / "alpamayo1.5" / "src", r / "alpamayo1.5",
+                  r / "alpamayo1_5" / "src", r / "src"]
+    return cands
+
+
+def _try_add_and_import(path: Path) -> bool:
+    """If ``path`` holds an ``alpamayo1_5`` package, add it to sys.path & import."""
+    if not (path / "alpamayo1_5").is_dir():
+        return False
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
     try:
         import alpamayo1_5  # noqa: F401
-    except ImportError as e:
-        raise ImportError(
-            "Could not import alpamayo1_5. Pass --alpamayo-src, set "
-            f"{ENV_SRC}, or install the Alpamayo 1.5 package."
-        ) from e
+        return True
+    except ImportError:
+        return False
+
+
+def _ensure_importable(src: str | Path | None):
+    """Make ``alpamayo1_5`` importable, auto-detecting the source like R1.
+
+    Resolution order:
+        1. explicit ``src`` (from --alpamayo-src / ALPAMAYO15_SRC / config),
+        2. an already-importable / installed ``alpamayo1_5`` package,
+        3. a standard clone location (see ``_auto_src_candidates``).
+    """
+    # 1. Explicit override.
+    if src:
+        srcp = Path(src).expanduser().resolve()
+        if not srcp.exists():
+            raise FileNotFoundError(f"Alpamayo 1.5 source path not found: {srcp}")
+        if str(srcp) not in sys.path:
+            sys.path.insert(0, str(srcp))
+
+    # 2. Already importable (installed, on PYTHONPATH, or just added above).
+    try:
+        import alpamayo1_5  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    # 3. Auto-detect a standard clone location.
+    for cand in _auto_src_candidates():
+        if _try_add_and_import(cand):
+            return
+
+    raise ImportError(
+        "Could not import alpamayo1_5. Clone the Alpamayo 1.5 inference code "
+        "(https://github.com/NVlabs/alpamayo1.5) next to this repo or under "
+        "~/workspace, `pip install -e` it, or point --alpamayo-src / "
+        f"${ENV_SRC} at its 'src' directory."
+    )
 
 
 class R15Adapter(ModelAdapter):
