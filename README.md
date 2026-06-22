@@ -2,7 +2,7 @@
 
 # 🏔️ oom-free-alpamayo
 
-**Run NVIDIA Alpamayo (R1 & 1.5) on a 12 GB GPU — no quantization, no pruning, no accuracy loss.**
+**Run NVIDIA Alpamayo 1.5 on a 12 GB GPU — no quantization, no pruning, no accuracy loss.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org)
@@ -11,7 +11,7 @@
 [![arXiv](https://img.shields.io/badge/arXiv-2605.11678-b31b1b.svg)](https://arxiv.org/abs/2605.11678)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/aveeslab/oom-free-alpamayo/pulls)
 
-*Memory-efficient inference framework for NVIDIA Alpamayo Vision-Language-Action (VLA) models on resource-constrained GPUs.*
+*OOM-free inference for the NVIDIA Alpamayo 1.5 Vision-Language-Action (VLA) model via CPU–GPU memory swapping.*
 
 [**Quick Start**](#-quick-start) · [**How It Works**](#-how-it-works) · [**Benchmarks**](#-benchmarks) · [**Citation**](#-citation)
 
@@ -21,7 +21,7 @@
 
 ## 🚀 Overview
 
-Alpamayo-10B needs **~21.5 GB of VRAM** — out of reach for consumer GPUs. `oom-free-alpamayo` fits it onto **12–16 GB cards** using **system-level optimization alone**, so the model runs *bit-for-bit identically* to the full-VRAM baseline. Two model versions are supported behind one CLI:
+Alpamayo-1.5-10B needs **~21.5 GB of VRAM** — out of reach for consumer GPUs. `oom-free-alpamayo` fits it onto **12–16 GB cards** using **CPU–GPU memory swapping at layer granularity**, so the model runs *bit-for-bit identically* to the full-VRAM baseline. Alpamayo-R1 is also supported through the same CLI.
 
 ```bash
 pip install -e .
