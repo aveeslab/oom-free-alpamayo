@@ -101,67 +101,62 @@ def main() -> int:
     torch.cuda.set_device(args.device)
     device = f"cuda:{args.device}"
 
-    print("=" * 60)
-    print(f"{adapter.display_name} Memory Optimizer - Inference")
-    print("=" * 60)
+    # Quiet HuggingFace shard-loading bars / advisory logs for clean output.
+    try:
+        from transformers.utils import logging as _hf
+        _hf.set_verbosity_error(); _hf.disable_progress_bar()
+    except Exception:
+        pass
 
-    # [1] Config
-    print(f"\n[1] Loading config: {args.config}")
-    print(f"    Model            : {adapter.display_name} ({adapter.kind})")
-    print(f"    GPU expected     : {config.system.gpu_name}")
-    print(f"    VRAM budget      : {config.system.vram_budget_gb:.2f} GB")
-    print(f"    Resident layers  : {config.residency.num_resident} of "
-          f"{config.model.vlm_layers}")
+    bar = "═" * 60
+    print(bar)
+    print(f"  oom-free-alpamayo · Inference · {adapter.display_name}")
+    print(bar)
+
+    # [1/4] Config
+    budget = config.system.vram_budget_gb
+    print(f"\n[1/4] Config · {args.config}")
+    print(f"      Model    : {adapter.display_name} ({adapter.kind})")
+    print(f"      GPU      : {config.system.gpu_name}")
+    print(f"      Resident : {config.residency.num_resident} / "
+          f"{config.model.vlm_layers} VLM layers")
     actual_gpu = torch.cuda.get_device_properties(args.device).name
     if actual_gpu != config.system.gpu_name:
-        print(f"    [!] Current GPU '{actual_gpu}' differs from config "
-              f"'{config.system.gpu_name}'. Performance may vary.")
+        print(f"      [!] Current GPU '{actual_gpu}' differs from config "
+              f"'{config.system.gpu_name}'; performance may vary.")
+    if args.input is not None:
+        print("      [!] Custom --input not supported yet; using the default sample.",
+              file=sys.stderr)
 
     if args.lock_clock:
         gpu.lock_gpu_clock(args.max_clock, args.device)
 
-    if args.input is not None:
-        print("[!] Custom --input is not supported yet; using the default "
-              "benchmark sample.", file=sys.stderr)
-
-    # [2] Load model
-    print(f"\n[2] Loading {adapter.display_name} (CPU)...")
+    # [2/4] Load model + install demand-layering pipeline
+    print("\n[2/4] Loading model + installing demand-layering pipeline...")
     torch.cuda.empty_cache(); gc.collect()
     loaded = adapter.load(args, config)
     if len(loaded.vlm_layers) != config.model.vlm_layers:
-        print(f"    [!] VLM layer count mismatch: model has "
+        print(f"      [!] VLM layer count mismatch: model has "
               f"{len(loaded.vlm_layers)}, config expects {config.model.vlm_layers}",
               file=sys.stderr)
         return 2
-
-    # [3] Essentials -> GPU
-    print("\n[3] Moving non-layer essentials to GPU...")
     adapter.setup_essentials(loaded, device)
-
-    # [4] Resident VLM layers -> GPU
     resident = list(config.residency.resident_indices)
-    print(f"\n[4] Loading {len(resident)} resident VLM layers to GPU...")
     for i in resident:
         loaded.vlm_layers[i].to(device)
-
-    # [5] Install the 3-hook pipeline
-    print("\n[5] Installing DoubleBufHook pipeline (VLM + ViT + Expert)...")
     pipeline = TriHookPipeline(loaded.vlm_layers, loaded.vit_blocks,
                                loaded.expert_layers, resident, device=device)
+    inputs = adapter.prepare_inputs(loaded, args, device)
     torch.cuda.synchronize(args.device)
     vram_after = torch.cuda.memory_allocated(args.device) / (1024 ** 3)
-    print(f"    VRAM after setup : {vram_after:.2f} GB "
-          f"(budget {config.system.vram_budget_gb:.2f} GB)")
-    if vram_after > config.system.vram_budget_gb:
-        print("    [!] Allocated VRAM exceeds the configured budget.",
+    print(f"      VRAM in use : {vram_after:.2f} GB / {budget:.2f} GB budget  "
+          f"[{'✓' if vram_after <= budget else '!'}]")
+    if vram_after > budget:
+        print("      [!] Allocated VRAM exceeds the configured budget.",
               file=sys.stderr)
 
-    # [6] Inputs
-    print("\n[6] Preparing inputs...")
-    inputs = adapter.prepare_inputs(loaded, args, device)
-
-    # [7] Run
-    print(f"\n[7] Running: {args.warmup} warmup + {args.num_iterations} timed...")
+    # [3/4] Run
+    print(f"\n[3/4] Running · {args.warmup} warmup + {args.num_iterations} timed")
 
     def run_once():
         pipeline.start_iteration()
@@ -181,23 +176,22 @@ def main() -> int:
         t0 = time.perf_counter()
         last_out = run_once()
         times.append(time.perf_counter() - t0)
-        print(f"    iter {i + 1}: {times[-1]:.3f} s")
+        print(f"      iter {i + 1}: {times[-1]:.3f} s")
 
+    # [4/4] Optional output
+    if args.output is not None and last_out is not None:
+        _serialize_output(last_out, args.output)
+        print(f"\n[4/4] Trajectories → {args.output}")
+
+    pipeline.remove()
     if times:
         mean_s = sum(times) / len(times)
         std_s = (sum((t - mean_s) ** 2 for t in times) / len(times)) ** 0.5
         peak_gb = torch.cuda.max_memory_allocated(args.device) / (1024 ** 3)
-        print(f"\n    Mean inference   : {mean_s:.3f} s (std {std_s:.3f}, "
-              f"n={len(times)})")
-        print(f"    Peak VRAM        : {peak_gb:.2f} GB")
-
-    # [8] Optional output
-    if args.output is not None and last_out is not None:
-        print(f"\n[8] Saving trajectories to {args.output}...")
-        _serialize_output(last_out, args.output)
-
-    pipeline.remove()
-    print("\nDone.")
+        print("\n" + "─" * 60)
+        print(f"  ✓ {mean_s:.3f} s / inference  (std {std_s:.3f}, n={len(times)}) · "
+              f"peak {peak_gb:.2f} GB / {budget:.2f} GB")
+        print("─" * 60)
     return 0
 
 

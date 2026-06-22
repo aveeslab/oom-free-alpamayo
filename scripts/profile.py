@@ -79,30 +79,36 @@ def main() -> int:
     torch.cuda.set_device(args.device)
     device = f"cuda:{args.device}"
 
-    print("=" * 60)
-    print(f"{adapter.display_name} Memory Optimizer - Profiler")
-    print("=" * 60)
+    # Quiet HuggingFace shard-loading bars / advisory logs for clean output.
+    try:
+        from transformers.utils import logging as _hf
+        _hf.set_verbosity_error(); _hf.disable_progress_bar()
+    except Exception:
+        pass
 
-    # [1] System
-    print("\n[1] Detecting system specifications...")
+    bar = "═" * 60
+    print(bar)
+    print(f"  oom-free-alpamayo · Profiler · {adapter.display_name}")
+    print(bar)
+
+    # [1/5] System
     cpu_dram_gb = profiler.detect_cpu_dram_gb()
     gpu_info = profiler.detect_gpu_info(args.device)
     vram_total_gb = gpu_info["vram_total_gb"]
     vram_budget_gb = args.vram_budget if args.vram_budget else vram_total_gb - 1.0
-    print(f"    CPU DRAM total : {cpu_dram_gb:.2f} GB")
-    print(f"    GPU            : {gpu_info['name']}")
-    print(f"    VRAM total     : {vram_total_gb:.2f} GB")
+    print("\n[1/5] System")
+    print(f"      GPU         : {gpu_info['name']} ({vram_total_gb:.2f} GB)")
     if vram_budget_gb > vram_total_gb:
-        print(f"    [!] --vram-budget {vram_budget_gb:.2f} GB exceeds total "
+        print(f"      [!] --vram-budget {vram_budget_gb:.2f} GB exceeds total "
               f"{vram_total_gb:.2f} GB", file=sys.stderr)
         return 2
-    print(f"    VRAM budget    : {vram_budget_gb:.2f} GB")
+    print(f"      VRAM budget : {vram_budget_gb:.2f} GB")
+    print(f"      CPU DRAM    : {cpu_dram_gb:.2f} GB")
 
     if args.lock_clock:
         gpu.lock_gpu_clock(args.max_clock, args.device)
 
-    # [2] Load model
-    print(f"\n[2] Loading {adapter.display_name} (CPU)...")
+    # [2/5] Model
     torch.cuda.empty_cache(); gc.collect()
     loaded = adapter.load(args)
     n_vlm = len(loaded.vlm_layers)
@@ -111,22 +117,18 @@ def main() -> int:
                    if loaded.vit_blocks else 0.0)
     exp_size_mb = (profiler.get_vlm_layer_size_mb(loaded.expert_layers)
                    if loaded.expert_layers else 0.0)
-    print(f"    Model weights total : {loaded.weights_total_gb:.2f} GB")
     profiler.verify_cpu_can_hold_weights(loaded.model, cpu_dram_gb)
-    print("    CPU DRAM check      : OK")
-    print(f"    VLM layers          : {n_vlm} x {vlm_layer_size_mb:.2f} MB "
-          f"= {n_vlm * vlm_layer_size_mb / 1024:.2f} GB")
-    print(f"    ViT blocks          : {len(loaded.vit_blocks)} x {vit_size_mb:.2f} MB "
-          f"= {len(loaded.vit_blocks) * vit_size_mb / 1024:.2f} GB")
-    print(f"    Expert layers       : {len(loaded.expert_layers)} x {exp_size_mb:.2f} MB "
-          f"= {len(loaded.expert_layers) * exp_size_mb / 1024:.2f} GB")
+    print(f"\n[2/5] Model · {adapter.display_name}")
+    print(f"      Weights     : {loaded.weights_total_gb:.2f} GB  (fits CPU DRAM)")
+    print(f"      VLM         : {n_vlm} layers × {vlm_layer_size_mb:.1f} MB"
+          f" = {n_vlm * vlm_layer_size_mb / 1024:.2f} GB")
+    print(f"      ViT         : {len(loaded.vit_blocks)} blocks × {vit_size_mb:.1f} MB"
+          f" = {len(loaded.vit_blocks) * vit_size_mb / 1024:.2f} GB")
+    print(f"      Expert      : {len(loaded.expert_layers)} layers × {exp_size_mb:.1f} MB"
+          f" = {len(loaded.expert_layers) * exp_size_mb / 1024:.2f} GB")
 
-    # [3] Essentials -> GPU
-    print("\n[3] Moving non-layer essentials to GPU...")
+    # [3/5] Profiling — essentials to GPU, then sequential demand layering (Nr=0).
     adapter.setup_essentials(loaded, device)
-
-    # [4] Sequential Demand Layering (Nr=0): all VLM/ViT/Expert offloaded.
-    print("\n[4] Sequential Demand Layering (Nr=0) profiling...")
     pipeline = TriHookPipeline(loaded.vlm_layers, loaded.vit_blocks,
                                loaded.expert_layers, vlm_resident=[], device=device)
     inputs = adapter.prepare_inputs(loaded, args, device)
@@ -137,30 +139,31 @@ def main() -> int:
             adapter.run(loaded, inputs, args)
         torch.cuda.synchronize(args.device)
 
+    print("\n[3/5] Profiling · sequential demand layering (Nr=0)")
     run_once()  # warmup
     timing = profiler.run_sequential_dl_profile(run_once, args.device)
     full_offload_time_s = timing["full_offload_time_s"]
     peak_vram_gb = timing["peak_vram_gb"]
-    print(f"    Full-offload time   : {full_offload_time_s:.3f} s")
-    print(f"    Peak VRAM (Nr=0)    : {peak_vram_gb:.2f} GB")
+    print(f"      Full-offload time : {full_offload_time_s:.2f} s")
+    print(f"      Peak VRAM         : {peak_vram_gb:.2f} GB")
     pipeline.remove()
     del inputs
     torch.cuda.empty_cache(); gc.collect()
 
-    # [5] Residency planning. Making k layers resident adds k*layer to the
+    # [4/5] Residency plan. Making k layers resident adds k*layer to the
     # Nr=0 peak, so max k = (budget - peak) / layer_size.
-    print("\n[5] Residency planning...")
     available_gb = max(0.0, vram_budget_gb - peak_vram_gb)
     max_possible = min(int(available_gb * 1024 / vlm_layer_size_mb), n_vlm - 1)
     minimum = 1 if max_possible > 0 else 0
     num_resident = max(minimum, max_possible - args.margin)
     indices = profiler.interleaved_placement(num_resident, n_vlm)
-    print(f"    Max possible        : {max_possible}")
-    print(f"    Conservative (-{args.margin})    : {num_resident}")
-    print(f"    Resident indices    : {indices}")
+    shown = ", ".join(str(i) for i in indices[:12]) + (", …" if len(indices) > 12 else "")
+    print("\n[4/5] Residency plan")
+    print(f"      Resident VLM : {num_resident} / {n_vlm}  "
+          f"(max fit {max_possible}, margin −{args.margin})")
+    print(f"      Indices      : [{shown}]")
 
-    # [6] Save config
-    print("\n[6] Saving config...")
+    # [5/5] Save config
     model_cfg = cfg.ModelConfig(
         name=loaded.settings.get("model_id", adapter.default_model_id),
         kind=adapter.kind,
@@ -188,11 +191,13 @@ def main() -> int:
         ),
     )
     cfg.save_config(config, args.output)
-    print(f"    Config saved to     : {args.output}")
-    print(f"    Full-offload time   : {full_offload_time_s:.3f} s "
-          f"(reference baseline for this machine)")
+    print(f"\n[5/5] Saved → {args.output}")
 
-    print("\nDone.")
+    print("\n" + "─" * 60)
+    print(f"  ✓ Ready · resident {num_resident}/{n_vlm} VLM layers · "
+          f"full-offload {full_offload_time_s:.2f} s")
+    print(f"    Next: python scripts/infer.py --config {args.output}")
+    print("─" * 60)
     return 0
 
 

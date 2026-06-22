@@ -120,41 +120,66 @@ python scripts/infer.py --config config.json --num-iterations 5   # timing stats
 > 🔒 Both commands **lock the GPU graphics clock by default** for reproducible timing (needs `sudo`; you'll be prompted for your machine's password). Add `--no-lock-clock` to skip it.
 
 <details>
-<summary><b>📋 Example profiler output</b></summary>
+<summary><b>📋 Example output — profiler</b></summary>
 
 ```text
-============================================================
-Alpamayo 1.5 Memory Optimizer - Profiler
-============================================================
+════════════════════════════════════════════════════════════
+  oom-free-alpamayo · Profiler · Alpamayo 1.5
+════════════════════════════════════════════════════════════
 
-[1] Detecting system specifications...
-    CPU DRAM total : 32.00 GB
-    GPU            : NVIDIA GeForce RTX 5070 Ti
-    VRAM total     : 16.30 GB
-    VRAM budget    : 15.30 GB
+[1/5] System
+      GPU         : NVIDIA GeForce RTX 5070 Ti (15.47 GB)
+      VRAM budget : 14.47 GB
+      CPU DRAM    : 31.06 GB
 
-[2] Loading Alpamayo 1.5 (CPU)...
-    Model weights total : 21.52 GB
-    CPU DRAM check      : OK
-    VLM layers          : 36 x 348.39 MB = 12.25 GB
-    ViT blocks          : 27 x 25.18 MB = 0.66 GB
-    Expert layers       : 6 x 86.30 MB = 0.51 GB
+[2/5] Model · Alpamayo 1.5
+      Weights     : 20.64 GB  (fits CPU DRAM)
+      VLM         : 36 layers × 368.0 MB = 12.94 GB
+      ViT         : 27 blocks × 29.1 MB = 0.77 GB
+      Expert      : 36 layers × 120.8 MB = 4.25 GB
 
-[3] Moving non-layer essentials to GPU...
+[3/5] Profiling · sequential demand layering (Nr=0)
+      Full-offload time : 7.29 s
+      Peak VRAM         : 4.36 GB
 
-[4] Sequential Demand Layering (Nr=0) profiling...
-    Full-offload time   : 14.520 s
-    Peak VRAM (Nr=0)    : 3.84 GB
+[4/5] Residency plan
+      Resident VLM : 26 / 36  (max fit 28, margin −2)
+      Indices      : [0, 1, 2, 4, 5, 6, 8, 9, 10, 12, …]
 
-[5] Residency planning...
-    Max possible        : 31
-    Conservative (-2)    : 29
-    Resident indices    : [0, 1, 3, 5, 6, ...]
+[5/5] Saved → config.json
 
-[6] Saving config...
-    Config saved to     : config.json
+────────────────────────────────────────────────────────────
+  ✓ Ready · resident 26/36 VLM layers · full-offload 7.29 s
+    Next: python scripts/infer.py --config config.json
+────────────────────────────────────────────────────────────
+```
 
-Done.
+</details>
+
+<details>
+<summary><b>📋 Example output — inference</b></summary>
+
+```text
+════════════════════════════════════════════════════════════
+  oom-free-alpamayo · Inference · Alpamayo 1.5
+════════════════════════════════════════════════════════════
+
+[1/4] Config · config.json
+      Model    : Alpamayo 1.5 (r15)
+      GPU      : NVIDIA GeForce RTX 5070 Ti
+      Resident : 26 / 36 VLM layers
+
+[2/4] Loading model + installing demand-layering pipeline...
+      VRAM in use : 12.75 GB / 14.47 GB budget  [✓]
+
+[3/4] Running · 1 warmup + 3 timed
+      iter 1: 3.497 s
+      iter 2: 3.494 s
+      iter 3: 3.494 s
+
+────────────────────────────────────────────────────────────
+  ✓ 3.495 s / inference  (std 0.002, n=3) · peak 13.71 GB / 14.47 GB
+────────────────────────────────────────────────────────────
 ```
 
 </details>

@@ -59,6 +59,13 @@ def _split(value: str | None) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
+def _flash_attn_available() -> bool:
+    """True if flash-attn is importable. Alpamayo 1.5 defaults to it, so when
+    it's missing we transparently fall back to PyTorch SDPA."""
+    import importlib.util
+    return importlib.util.find_spec("flash_attn") is not None
+
+
 def _auto_src_candidates() -> list[Path]:
     """Well-known locations that may contain the ``alpamayo1_5`` source package.
 
@@ -200,6 +207,13 @@ class R15Adapter(ModelAdapter):
         if t0 is None:
             t0 = int(os.environ.get(ENV_T0_US) or (m.t0_us if m and m.t0_us else FALLBACK_T0_US))
 
+        # Alpamayo 1.5 defaults to flash_attn2; fall back to SDPA when the
+        # flash-attn package isn't installed so it works out of the box.
+        attn = pick(getattr(args, "attn_implementation", None), ENV_ATTN,
+                    m.attn_implementation if m else None)
+        if not attn and not _flash_attn_available():
+            attn = "sdpa"
+
         return {
             "src": str(Path(src).expanduser()) if src else None,
             "model_id": pick(getattr(args, "model_id", None), ENV_MODEL_ID,
@@ -208,8 +222,7 @@ class R15Adapter(ModelAdapter):
             "revision": pick(getattr(args, "model_revision", None),
                              ENV_MODEL_REVISION, m.model_revision if m else None),
             "local_files_only": bool(local),
-            "attn": pick(getattr(args, "attn_implementation", None), ENV_ATTN,
-                         m.attn_implementation if m else None),
+            "attn": attn,
             "clip_id": pick(getattr(args, "clip_id", None), ENV_CLIP_ID,
                             m.clip_id if m else None, FALLBACK_CLIP_ID),
             "t0_us": int(t0),
