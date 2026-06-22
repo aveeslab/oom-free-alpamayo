@@ -82,18 +82,19 @@ This repo **depends on but does not redistribute** the Alpamayo source or weight
 <details open>
 <summary><b>Alpamayo 1.5 (default)</b></summary>
 
-Make the Alpamayo 1.5 source importable and copy the env template:
+Clone the [Alpamayo 1.5 inference code](https://github.com/NVlabs/alpamayo1.5) and download the `nvidia/Alpamayo-1.5-10B` weights from Hugging Face. The source is **auto-detected** when cloned next to this repo or under `~/workspace` — no environment variable required:
 
 ```bash
-cp env.example .env        # then edit: ALPAMAYO15_SRC, model cache, etc.
-# or: export ALPAMAYO15_SRC=/path/to/alpamayo1.5/src
+git clone https://github.com/NVlabs/alpamayo1.5.git   # alongside oom-free-alpamayo
 ```
+
+If you keep it elsewhere, point `--alpamayo-src` (or `$ALPAMAYO15_SRC`) at its `src/` directory. Other optional knobs (model cache, attention impl, …) live in `env.example`.
 </details>
 
 <details>
 <summary><b>Alpamayo-R1</b></summary>
 
-Follow NVIDIA's instructions to install the `alpamayo_r1` package and download the `nvidia/Alpamayo-R1-10B` weights. No env vars needed.
+Install the `alpamayo_r1` package (importable in your environment) and download the `nvidia/Alpamayo-R1-10B` weights. No environment variable required.
 </details>
 
 ### 2. Install this framework
