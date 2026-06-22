@@ -1,17 +1,19 @@
-"""Run Alpamayo-R1 inference using a saved residency config.
+"""Run Alpamayo inference using a saved residency config.
 
-Mirrors `research/RF/quick_run.py`: three DoubleBufHook instances (VLM, ViT,
-Expert) share GPU buffer slots and a prefetch CUDA stream.
+The model is taken from ``--model`` or, if omitted, from the ``kind`` field of
+the config produced by ``scripts/profile.py``.
 
 Usage:
     python scripts/infer.py --config config.json
     python scripts/infer.py --config config.json --num-iterations 5
+    python scripts/infer.py --config config.json -o trajectory.json
 """
 
 from __future__ import annotations
 
 import argparse
 import gc
+import json
 import os
 import sys
 import time
@@ -27,130 +29,175 @@ sys.path[:] = [p for p in sys.path if p != str(_HERE)]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from alpamayo_memopt import DoubleBufHook, load_config  # noqa: E402
-from alpamayo_memopt import setup as rf  # noqa: E402
+from alpamayo_memopt import gpu, load_config        # noqa: E402
+from alpamayo_memopt.models import (                 # noqa: E402
+    ADAPTER_CHOICES, DEFAULT_KIND, TriHookPipeline, get_adapter,
+)
 
 
-def parse_args() -> argparse.Namespace:
+def _serialize_output(out, path: Path) -> None:
+    """Best-effort JSON serialization of inference output."""
+    def to_jsonable(x):
+        if isinstance(x, torch.Tensor):
+            return x.detach().cpu().tolist()
+        if isinstance(x, dict):
+            return {k: to_jsonable(v) for k, v in x.items()}
+        if isinstance(x, (list, tuple)):
+            return [to_jsonable(v) for v in x]
+        return x
+    path.write_text(json.dumps(to_jsonable(out), indent=2))
+
+
+def build_parser_and_config():
+    """Resolve model + config first, then add the adapter's options."""
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--model", choices=ADAPTER_CHOICES, default=None)
+    pre.add_argument("--config", "-c", type=Path, default=Path("config.json"))
+    pre_args, _ = pre.parse_known_args()
+
+    if not pre_args.config.exists():
+        print(f"[!] Config not found: {pre_args.config}. Run scripts/profile.py "
+              "first.", file=sys.stderr)
+        sys.exit(2)
+    config = load_config(pre_args.config)
+    kind = pre_args.model or config.model.kind or DEFAULT_KIND
+    adapter = get_adapter(kind)
+
     p = argparse.ArgumentParser(
-        description="Run Alpamayo-R1 inference with a saved residency config."
-    )
+        description="Run Alpamayo inference with a saved residency config.")
+    p.add_argument("--model", choices=ADAPTER_CHOICES, default=kind,
+                   help="Alpamayo version (default: config's kind).")
     p.add_argument("--config", "-c", type=Path, default=Path("config.json"),
-                   help="Path to config.json from scripts/profile.py "
-                        "(default: ./config.json)")
+                   help="Path to config.json from scripts/profile.py.")
     p.add_argument("--num-iterations", "-n", type=int, default=1,
-                   help="Number of timed inference iterations.")
+                   help="Timed inference iterations (default: 1).")
     p.add_argument("--warmup", type=int, default=1,
-                   help="Number of warmup iterations (untimed).")
+                   help="Untimed warmup iterations (default: 1).")
+    p.add_argument("--output", "-o", type=Path, default=None,
+                   help="Optional path to save predicted trajectories (JSON).")
+    p.add_argument("--input", type=Path, default=None,
+                   help="Optional input JSON (default: standard benchmark sample).")
+    p.add_argument("--device", type=int, default=0, help="CUDA device index.")
+    p.add_argument("--num-traj-samples", type=int, default=None,
+                   help="Trajectory samples per inference (default: model-specific).")
+    p.add_argument("--max-generation-length", type=int, default=None,
+                   help="VLM max_new_tokens per inference (default: model-specific).")
+    p.add_argument("--lock-clock", action=argparse.BooleanOptionalAction, default=True,
+                   help="Lock the GPU graphics clock (default: on; needs sudo).")
     p.add_argument("--max-clock", type=int, default=None,
-                   help="If set, lock GPU graphics clock (sudo).")
-    return p.parse_args()
+                   help="Graphics clock to lock in MHz (default: max supported).")
+    adapter.add_args(p)
+    return p, adapter, config
 
 
 def main() -> int:
-    args = parse_args()
+    parser, adapter, config = build_parser_and_config()
+    args = parser.parse_args()
+    if args.num_traj_samples is None:
+        args.num_traj_samples = adapter.default_num_traj_samples
+    if args.max_generation_length is None:
+        args.max_generation_length = adapter.default_max_generation_length
+
+    torch.cuda.set_device(args.device)
+    device = f"cuda:{args.device}"
+
     print("=" * 60)
-    print("Alpamayo Memory Optimizer — Inference")
+    print(f"{adapter.display_name} Memory Optimizer - Inference")
     print("=" * 60)
 
-    config = load_config(args.config)
-    print(f"\n[1] Config: {args.config}")
-    print(f"    GPU expected      : {config.system.gpu_name}")
-    print(f"    Resident layers   : {config.residency.num_resident} of "
+    # [1] Config
+    print(f"\n[1] Loading config: {args.config}")
+    print(f"    Model            : {adapter.display_name} ({adapter.kind})")
+    print(f"    GPU expected     : {config.system.gpu_name}")
+    print(f"    VRAM budget      : {config.system.vram_budget_gb:.2f} GB")
+    print(f"    Resident layers  : {config.residency.num_resident} of "
           f"{config.model.vlm_layers}")
-    print(f"    Predicted time    : "
-          f"{config.predicted_performance.inference_time_s:.3f} s")
+    actual_gpu = torch.cuda.get_device_properties(args.device).name
+    if actual_gpu != config.system.gpu_name:
+        print(f"    [!] Current GPU '{actual_gpu}' differs from config "
+              f"'{config.system.gpu_name}'. Performance may vary.")
 
-    if args.max_clock:
-        rf.set_max_clock(args.max_clock)
+    if args.lock_clock:
+        gpu.lock_gpu_clock(args.max_clock, args.device)
 
-    # Load model and benchmark sample
-    print("\n[2] Loading model + benchmark sample...")
+    if args.input is not None:
+        print("[!] Custom --input is not supported yet; using the default "
+              "benchmark sample.", file=sys.stderr)
+
+    # [2] Load model
+    print(f"\n[2] Loading {adapter.display_name} (CPU)...")
     torch.cuda.empty_cache(); gc.collect()
-    model = rf.load_model()
-    vlm_layers, vblocks, expert_layers = rf.setup_gpu_essentials(model)
-
-    if len(vlm_layers) != config.model.vlm_layers:
-        print(f"    [!] VLM layer count mismatch: model has {len(vlm_layers)}, "
-              f"config expects {config.model.vlm_layers}", file=sys.stderr)
+    loaded = adapter.load(args, config)
+    if len(loaded.vlm_layers) != config.model.vlm_layers:
+        print(f"    [!] VLM layer count mismatch: model has "
+              f"{len(loaded.vlm_layers)}, config expects {config.model.vlm_layers}",
+              file=sys.stderr)
         return 2
 
-    data_cache = rf.load_data()
-    model_inputs = rf.prepare_inputs(model, data_cache)
+    # [3] Essentials -> GPU
+    print("\n[3] Moving non-layer essentials to GPU...")
+    adapter.setup_essentials(loaded, device)
 
-    # Move resident VLM layers to GPU
-    vlm_resident = list(config.residency.resident_indices)
-    for i in vlm_resident:
-        vlm_layers[i].to("cuda")
-    vlm_offload = sorted(set(range(len(vlm_layers))) - set(vlm_resident))
+    # [4] Resident VLM layers -> GPU
+    resident = list(config.residency.resident_indices)
+    print(f"\n[4] Loading {len(resident)} resident VLM layers to GPU...")
+    for i in resident:
+        loaded.vlm_layers[i].to(device)
 
-    # Three hooks, shared buffers + prefetch stream
-    print("\n[3] Installing DoubleBufHook (VLM + ViT + Expert)...")
-    vlm_hook = DoubleBufHook(auto_restart=True)
-    vis_hook = DoubleBufHook(auto_restart=False)
-    exp_hook = DoubleBufHook(auto_restart=True)
+    # [5] Install the 3-hook pipeline
+    print("\n[5] Installing DoubleBufHook pipeline (VLM + ViT + Expert)...")
+    pipeline = TriHookPipeline(loaded.vlm_layers, loaded.vit_blocks,
+                               loaded.expert_layers, resident, device=device)
+    torch.cuda.synchronize(args.device)
+    vram_after = torch.cuda.memory_allocated(args.device) / (1024 ** 3)
+    print(f"    VRAM after setup : {vram_after:.2f} GB "
+          f"(budget {config.system.vram_budget_gb:.2f} GB)")
+    if vram_after > config.system.vram_budget_gb:
+        print("    [!] Allocated VRAM exceeds the configured budget.",
+              file=sys.stderr)
 
-    if vlm_offload:
-        vlm_hook.pin(vlm_layers, vlm_offload)
-    vis_hook.pin(vblocks, list(range(len(vblocks))))
-    exp_hook.pin(expert_layers, list(range(len(expert_layers))))
+    # [6] Inputs
+    print("\n[6] Preparing inputs...")
+    inputs = adapter.prepare_inputs(loaded, args, device)
 
-    mx = max(
-        vlm_hook.max_elements() if vlm_offload else 0,
-        vis_hook.max_elements(),
-        exp_hook.max_elements(),
-    )
-    shared_bufs = [torch.empty(mx, dtype=torch.bfloat16, device="cuda") for _ in range(2)]
-    shared_ps = torch.cuda.Stream()
-    vlm_hook.set_bufs(shared_bufs, prefetch_stream=shared_ps)
-    vis_hook.set_bufs(shared_bufs, prefetch_stream=shared_ps)
-    exp_hook.set_bufs(shared_bufs, prefetch_stream=shared_ps)
-
-    if vlm_offload:
-        vlm_hook.register(vlm_layers, vlm_offload)
-    vis_hook.register(vblocks, list(range(len(vblocks))))
-    exp_hook.register(expert_layers, list(range(len(expert_layers))))
+    # [7] Run
+    print(f"\n[7] Running: {args.warmup} warmup + {args.num_iterations} timed...")
 
     def run_once():
-        vlm_hook.reset(); vis_hook.reset(); exp_hook.reset()
-        vis_hook.start()
-        torch.manual_seed(42); torch.cuda.manual_seed_all(42)
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            model.sample_trajectories_from_data_with_vlm_rollout(
-                data=rf.deep_copy_inputs(model_inputs),
-                top_p=1.0, temperature=0.0,
-                num_traj_samples=1, max_generation_length=22, return_extra=True,
-            )
-        torch.cuda.synchronize()
+        pipeline.start_iteration()
+        with torch.no_grad():
+            out = adapter.run(loaded, inputs, args)
+        torch.cuda.synchronize(args.device)
+        return out
 
-    # Warmup
-    print(f"\n[4] Running: {args.warmup} warmup + {args.num_iterations} timed...")
     for _ in range(args.warmup):
         run_once()
-    torch.cuda.reset_peak_memory_stats()
-    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats(args.device)
+    torch.cuda.synchronize(args.device)
 
     times = []
+    last_out = None
     for i in range(args.num_iterations):
         t0 = time.perf_counter()
-        run_once()
-        t1 = time.perf_counter()
-        times.append(t1 - t0)
+        last_out = run_once()
+        times.append(time.perf_counter() - t0)
         print(f"    iter {i + 1}: {times[-1]:.3f} s")
 
     if times:
         mean_s = sum(times) / len(times)
         std_s = (sum((t - mean_s) ** 2 for t in times) / len(times)) ** 0.5
-        peak_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
-        print(f"\n    Mean              : {mean_s:.3f} s (std {std_s:.3f}, n={len(times)})")
-        print(f"    Peak VRAM         : {peak_gb:.2f} GB")
-        print(f"    Predicted (config): "
-              f"{config.predicted_performance.inference_time_s:.3f} s")
-        print(f"    Δ vs predicted    : "
-              f"{(mean_s - config.predicted_performance.inference_time_s) * 1000:+.1f} ms")
+        peak_gb = torch.cuda.max_memory_allocated(args.device) / (1024 ** 3)
+        print(f"\n    Mean inference   : {mean_s:.3f} s (std {std_s:.3f}, "
+              f"n={len(times)})")
+        print(f"    Peak VRAM        : {peak_gb:.2f} GB")
 
-    # Cleanup
-    vlm_hook.remove(); vis_hook.remove(); exp_hook.remove()
+    # [8] Optional output
+    if args.output is not None and last_out is not None:
+        print(f"\n[8] Saving trajectories to {args.output}...")
+        _serialize_output(last_out, args.output)
+
+    pipeline.remove()
+    print("\nDone.")
     return 0
 
 

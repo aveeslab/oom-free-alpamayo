@@ -39,10 +39,12 @@ class DoubleBufHook:
                       automatically resubmits DMAs for the next iteration.
                       Set True for repeated modules (VLM Decode, Diffusion
                       Expert) and False for single-shot modules (ViT).
+        device:       CUDA device used for DFB buffers, streams, and events.
     """
 
-    def __init__(self, auto_restart: bool = True,
-                 enable_timing: bool = False) -> None:
+    def __init__(self, auto_restart: bool = True, device: str | torch.device = "cuda") -> None:
+        self.device = torch.device(device)
+
         # CPU-side pinned storage
         self.cpu_params: dict = {}     # idx -> {name: pinned_tensor}
         self.cpu_buffers: dict = {}    # idx -> {name: pinned_tensor}
@@ -59,22 +61,17 @@ class DoubleBufHook:
         self._pos: dict = {}           # idx -> position in offload_indices
 
         # CUDA streams and events
-        self.prefetch_stream: torch.cuda.Stream = torch.cuda.Stream()
+        with torch.cuda.device(self.device):
+            self.prefetch_stream: torch.cuda.Stream = torch.cuda.Stream(device=self.device)
+            self.compute_done: List[torch.cuda.Event] = [
+                torch.cuda.Event(), torch.cuda.Event()
+            ]
         self.dma_done: dict = {}                       # idx -> event
-        self.compute_done: List[torch.cuda.Event] = [
-            torch.cuda.Event(), torch.cuda.Event()
-        ]
 
         # Registered PyTorch hooks (for cleanup)
         self.hooks: List = []
 
         self.auto_restart: bool = auto_restart
-
-        # Optional per-call forward-time instrumentation
-        self.enable_timing: bool = enable_timing
-        self._pending_starts: List = []          # stack of (idx, start_event)
-        self.timings: List = []                  # [(idx, elapsed_ms), ...]
-                                                  #   filled lazily; call get_timings_ms()
 
     # -------------------------------------------------------------------
     # Buffer allocation
@@ -84,10 +81,11 @@ class DoubleBufHook:
         """Allocate two independent GPU buffers of `max_elements` BF16 elements."""
         for s in range(2):
             self.gpu_bufs[s] = torch.empty(
-                max_elements, dtype=torch.bfloat16, device="cuda"
+                max_elements, dtype=torch.bfloat16, device=self.device
             )
+        stream = torch.cuda.current_stream(self.device)
         for ev in self.compute_done:
-            ev.record()
+            ev.record(stream)
 
     def set_bufs(
         self,
@@ -105,8 +103,9 @@ class DoubleBufHook:
             self.compute_done = list(compute_done)
         if prefetch_stream is not None:
             self.prefetch_stream = prefetch_stream
+        stream = torch.cuda.current_stream(self.device)
         for ev in self.compute_done:
-            ev.record()
+            ev.record(stream)
 
     # -------------------------------------------------------------------
     # Layer pinning
@@ -232,7 +231,7 @@ class DoubleBufHook:
 
                     # RAW: wait until DMA is done for this layer
                     if idx in self.dma_done:
-                        torch.cuda.current_stream().wait_event(self.dma_done[idx])
+                        torch.cuda.current_stream(self.device).wait_event(self.dma_done[idx])
                         del self.dma_done[idx]
                     else:
                         # Fallback: synchronous copy if DMA not yet submitted
@@ -258,26 +257,13 @@ class DoubleBufHook:
                             if n in bd and n in self.buf_layout[idx]:
                                 o, sh, nu = self.buf_layout[idx][n]
                                 bd[n].data = buf[o:o + nu].view(sh)
-
-                    # Optional timing: record forward-start event
-                    if self.enable_timing:
-                        start_ev = torch.cuda.Event(enable_timing=True)
-                        start_ev.record()
-                        self._pending_starts.append((idx, start_ev))
                 return hook_fn
 
             def make_post(idx):
                 def hook_fn(module, inp, out):
                     s = self._slot(idx)
                     # Mark slot's compute as done (for next prefetch WAR check)
-                    self.compute_done[s].record()
-
-                    # Optional timing: pair with the matching pre-hook start event
-                    if self.enable_timing and self._pending_starts:
-                        p_idx, start_ev = self._pending_starts.pop()
-                        end_ev = torch.cuda.Event(enable_timing=True)
-                        end_ev.record()
-                        self.timings.append((p_idx, start_ev, end_ev))
+                    self.compute_done[s].record(torch.cuda.current_stream(self.device))
 
                     # Restore CPU pinned pointer references
                     pd = dict(module.named_parameters())
@@ -310,26 +296,12 @@ class DoubleBufHook:
     def reset(self) -> None:
         """Clear DMA state between inference iterations."""
         self.dma_done.clear()
+        stream = torch.cuda.current_stream(self.device)
         for ev in self.compute_done:
-            ev.record()
+            ev.record(stream)
 
     def remove(self) -> None:
         """Remove all registered forward hooks."""
         for h in self.hooks:
             h.remove()
         self.hooks.clear()
-
-    def get_timings_ms(self) -> List:
-        """Return per-call forward times collected when enable_timing=True.
-
-        Each element is (layer_idx, elapsed_ms). Synchronizes the device once.
-        """
-        if not self.enable_timing:
-            return []
-        torch.cuda.synchronize()
-        return [(idx, start.elapsed_time(end)) for idx, start, end in self.timings]
-
-    def clear_timings(self) -> None:
-        """Discard collected timings without disabling instrumentation."""
-        self.timings.clear()
-        self._pending_starts.clear()

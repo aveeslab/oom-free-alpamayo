@@ -1,9 +1,9 @@
 oom-free-alpamayo
 Copyright (c) 2026 AVEES Lab, Kookmin University
 
-This project provides a memory-efficient inference framework for the
-NVIDIA Alpamayo-R1 Vision-Language-Action model on resource-constrained
-GPU platforms.
+This project provides a memory-efficient inference framework for the NVIDIA
+Alpamayo Vision-Language-Action models (Alpamayo-R1 and Alpamayo 1.5) on
+resource-constrained GPU platforms.
 
 ================================================================================
 Third-Party Components
@@ -11,18 +11,25 @@ Third-Party Components
 
 This project depends on, but does not redistribute, the following components:
 
-1. NVIDIA Alpamayo-R1 (source code)
-   - Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
+1. NVIDIA Alpamayo-R1 / Alpamayo 1.5 (source code)
+   - Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES
    - License: Apache License 2.0
-   - Original repository: (NVIDIA NVlabs)
-   - This framework requires the user to install Alpamayo-R1 separately.
+   - Original repository: NVIDIA NVlabs
+   - This framework requires the user to install the Alpamayo source
+     separately (R1 as a package, or 1.5 via ALPAMAYO15_SRC / --alpamayo-src
+     / an installed alpamayo1_5 package).
 
-2. NVIDIA Alpamayo-R1-10B (model weights)
+2. NVIDIA Alpamayo-R1-10B / Alpamayo-1.5-10B (model weights)
    - Subject to NVIDIA's model license terms (separate from the Apache 2.0
      source code license).
    - Users must obtain the weights from official NVIDIA channels and comply
      with the applicable NVIDIA model license.
 
+3. test_inference.py contains a baseline derived from NVIDIA Alpamayo source
+   and is distributed under the Apache License 2.0 (see its file header),
+   not the MIT License of this repository.
+
 The MIT License of this repository applies only to the original code authored
-by AVEES Lab. Components installed as dependencies retain their respective
-licenses.
+by AVEES Lab. Components installed as dependencies, and files marked with a
+different license header, retain their respective licenses.
+</content>

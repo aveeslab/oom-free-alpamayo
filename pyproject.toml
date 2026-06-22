@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "oom-free-alpamayo"
-version = "0.1.0"
-description = "Memory-efficient inference for NVIDIA Alpamayo-R1 Vision-Language-Action model on resource-constrained GPU platforms"
+version = "0.2.0"
+description = "Memory-efficient inference for NVIDIA Alpamayo (R1 and 1.5) Vision-Language-Action models on resource-constrained GPU platforms"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
